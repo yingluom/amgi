@@ -10,40 +10,48 @@ workflows:
     scripts:
       - name: 1. 环境准备与依赖安装
         script: |
-          # 安装二进制工具
+          # 安装项目必需的二进制工具
           brew install protobuf swift-protobuf xcodegen
           
-          # 重新配置 Rust
+          # 配置 Rust 环境
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           source $HOME/.cargo/env
           
-          # 【关键修改】：只保留真机(aarch64)和现代M芯片模拟器(aarch64-sim)
-          # 删掉了会导致报错的 x86_64 目标
+          # 仅安装 iOS 真机和 M 芯片模拟器架构，避免 x86_64 报错并加速编译
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
       - name: 2. 初始化子模块
         script: |
+          # 必须拉取 anki-upstream，否则核心代码为空
           git submodule update --init --recursive
 
-      - name: 3. 编译 Rust XCFramework
+      - name: 3. 编译 Rust XCFramework (核心步骤)
         script: |
           source $HOME/.cargo/env
-          # 注意：如果 build-xcframework.sh 脚本内部强行写了要编 x86_64，
-          # 这一步可能还会报错。但我们先尝试跳过环境检查。
+          # 赋予执行权限并运行官方构建脚本
           chmod +x ./scripts/build-xcframework.sh
           ./scripts/build-xcframework.sh
 
       - name: 4. 生成 Proto 协议文件
         script: |
+          # 将 .proto 文件转换为 Swift 代码
           chmod +x ./scripts/generate-protos.sh
           ./scripts/generate-protos.sh
 
       - name: 5. 生成 Xcode 项目
         script: |
+          # 进入正确的子目录运行 xcodegen 产生 .xcodeproj
           cd AnkiApp && xcodegen generate
 
-      - name: 6. 编译并存档 (Archive)
+      - name: 6. 编译与存档 (Archive)
         script: |
+          # A. 预解析依赖并跳过宏验证（解决 DependenciesMacrosPlugin 报错）
+          xcodebuild -resolvePackageDependencies \
+            -project AnkiApp/AnkiApp.xcodeproj \
+            -scheme "$SCHEME" \
+            -skipMacroValidation
+            
+          # B. 存档编译
           xcodebuild archive \
             -project AnkiApp/AnkiApp.xcodeproj \
             -scheme "$SCHEME" \
@@ -52,10 +60,12 @@ workflows:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
-            GCC_GENERATE_DEBUGGING_SYMBOLS=NO
+            GCC_GENERATE_DEBUGGING_SYMBOLS=NO \
+            -skipMacroValidation
 
-      - name: 7. 打包 IPA
+      - name: 7. 制作未签名 IPA
         script: |
+          # 提取编译好的 .app 并放入 Payload 目录打包成 IPA
           mkdir -p Payload
           APP_PATH=$(find $CM_BUILD_DIR/AmgiApp.xcarchive -name "*.app" | head -n 1)
           cp -r "$APP_PATH" Payload/
