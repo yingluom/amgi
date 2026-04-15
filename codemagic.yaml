@@ -1,0 +1,73 @@
+workflows:
+  amgi-ios:
+    name: Amgi iOS Build
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+    environment:
+      xcode: latest
+      vars:
+        SCHEME: "AmgiApp"
+    scripts:
+      - name: 1. 环境准备与自动定位
+        script: |
+          brew install xcodegen
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source $HOME/.cargo/env
+          rustup target add aarch64-apple-ios
+          
+          # 动态寻找配置文件位置并存入环境变量
+          echo "正在定位项目核心文件..."
+          export CARGO_PATH=$(find . -name "Cargo.toml" | head -n 1)
+          export SPEC_PATH=$(find . -name "project.yml" | head -n 1)
+          
+          if [ -z "$CARGO_PATH" ]; then echo "致命错误: 找不到 Cargo.toml"; exit 1; fi
+          if [ -z "$SPEC_PATH" ]; then echo "致命错误: 找不到 project.yml"; exit 1; fi
+          
+          echo "找到 Cargo.toml 在: $CARGO_PATH"
+          echo "找到 project.yml 在: $SPEC_PATH"
+          
+          # 将路径导出给后续步骤使用
+          echo "CARGO_DIR=$(dirname $CARGO_PATH)" >> $CM_ENV
+          echo "SPEC_DIR=$(dirname $SPEC_PATH)" >> $CM_ENV
+          echo "SPEC_FILE=$SPEC_PATH" >> $CM_ENV
+
+      - name: 2. 编译 Rust 核心
+        script: |
+          source $HOME/.cargo/env
+          echo "进入 Rust 目录: $CARGO_DIR"
+          cd "$CARGO_DIR"
+          cargo build --target aarch64-apple-ios --release
+
+      - name: 3. 生成 Xcode 工程
+        script: |
+          # 使用找到的 project.yml 强制生成工程
+          xcodegen generate --spec "$SPEC_FILE"
+
+      - name: 4. 编译与存档
+        script: |
+          # 寻找生成的工程文件 (.xcodeproj)
+          PROJECT_FILE=$(find . -name "*.xcodeproj" | head -n 1)
+          echo "使用工程文件: $PROJECT_FILE"
+          
+          xcodebuild archive \
+            -project "$PROJECT_FILE" \
+            -scheme "$SCHEME" \
+            -archivePath $CM_BUILD_DIR/AmgiApp.xcarchive \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            GCC_GENERATE_DEBUGGING_SYMBOLS=NO
+
+      - name: 5. 手动打包 IPA
+        script: |
+          mkdir -p Payload
+          # 自动寻找编译出的 .app 路径
+          APP_PATH=$(find $CM_BUILD_DIR/AmgiApp.xcarchive -name "*.app" | head -n 1)
+          echo "找到 App 产物: $APP_PATH"
+          cp -r "$APP_PATH" Payload/
+          zip -r amgi_unsigned.ipa Payload
+          
+    artifacts:
+      - "*.ipa"
