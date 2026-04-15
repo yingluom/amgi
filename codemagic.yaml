@@ -6,66 +6,59 @@ workflows:
     environment:
       xcode: latest
       vars:
-        SCHEME: "AmgiApp"
+        SCHEME: "AnkiApp"
     scripts:
-      - name: 1. 环境准备与自动定位
+      - name: 1. 环境准备与依赖安装
         script: |
-          brew install xcodegen
+          # 安装文档要求的必要工具
+          brew install protobuf swift-protobuf xcodegen
+          
+          # 配置 Rust 及其 iOS 编译目标
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           source $HOME/.cargo/env
-          rustup target add aarch64-apple-ios
-          
-          # 动态寻找配置文件位置并存入环境变量
-          echo "正在定位项目核心文件..."
-          export CARGO_PATH=$(find . -name "Cargo.toml" | head -n 1)
-          export SPEC_PATH=$(find . -name "project.yml" | head -n 1)
-          
-          if [ -z "$CARGO_PATH" ]; then echo "致命错误: 找不到 Cargo.toml"; exit 1; fi
-          if [ -z "$SPEC_PATH" ]; then echo "致命错误: 找不到 project.yml"; exit 1; fi
-          
-          echo "找到 Cargo.toml 在: $CARGO_PATH"
-          echo "找到 project.yml 在: $SPEC_PATH"
-          
-          # 将路径导出给后续步骤使用
-          echo "CARGO_DIR=$(dirname $CARGO_PATH)" >> $CM_ENV
-          echo "SPEC_DIR=$(dirname $SPEC_PATH)" >> $CM_ENV
-          echo "SPEC_FILE=$SPEC_PATH" >> $CM_ENV
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios-simulator
 
-      - name: 2. 编译 Rust 核心
+      - name: 2. 初始化子模块
+        script: |
+          # 必须拉取 submodules，否则 anki-upstream 目录将为空
+          git submodule update --init --recursive
+
+      - name: 3. 编译 Rust XCFramework (耗时较长)
         script: |
           source $HOME/.cargo/env
-          echo "进入 Rust 目录: $CARGO_DIR"
-          cd "$CARGO_DIR"
-          cargo build --target aarch64-apple-ios --release
+          # 运行官方构建脚本
+          chmod +x ./scripts/build-xcframework.sh
+          ./scripts/build-xcframework.sh
 
-      - name: 3. 生成 Xcode 工程
+      - name: 4. 生成 Protobuf 协议文件
         script: |
-          # 使用找到的 project.yml 强制生成工程
-          xcodegen generate --spec "$SPEC_FILE"
+          # 将 .proto 文件转换为 Swift 代码
+          chmod +x ./scripts/generate-protos.sh
+          ./scripts/generate-protos.sh
 
-      - name: 4. 编译与存档
+      - name: 5. 生成 Xcode 项目文件
         script: |
-          # 寻找生成的工程文件 (.xcodeproj)
-          PROJECT_FILE=$(find . -name "*.xcodeproj" | head -n 1)
-          echo "使用工程文件: $PROJECT_FILE"
-          
+          # 进入正确的子目录运行 xcodegen
+          cd AnkiApp && xcodegen generate
+
+      - name: 6. 编译 iOS 工程 (Archive)
+        script: |
+          # 使用文档建议的参数进行无签名编译
           xcodebuild archive \
-            -project "$PROJECT_FILE" \
+            -project AnkiApp/AnkiApp.xcodeproj \
             -scheme "$SCHEME" \
             -archivePath $CM_BUILD_DIR/AmgiApp.xcarchive \
             -destination 'generic/platform=iOS' \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
-            CODE_SIGN_ENTITLEMENTS="" \
             GCC_GENERATE_DEBUGGING_SYMBOLS=NO
 
-      - name: 5. 手动打包 IPA
+      - name: 7. 打包 IPA
         script: |
           mkdir -p Payload
-          # 自动寻找编译出的 .app 路径
+          # 定位生成的 .app 文件并打包
           APP_PATH=$(find $CM_BUILD_DIR/AmgiApp.xcarchive -name "*.app" | head -n 1)
-          echo "找到 App 产物: $APP_PATH"
           cp -r "$APP_PATH" Payload/
           zip -r amgi_unsigned.ipa Payload
           
