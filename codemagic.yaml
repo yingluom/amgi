@@ -10,40 +10,40 @@ workflows:
     scripts:
       - name: 1. 环境准备与依赖安装
         script: |
-          # 安装文档要求的必要工具
+          # 安装二进制工具
           brew install protobuf swift-protobuf xcodegen
           
-          # 配置 Rust 及其 iOS 编译目标
+          # 重新配置 Rust
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           source $HOME/.cargo/env
-          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios-simulator
+          
+          # 【关键修改】：只保留真机(aarch64)和现代M芯片模拟器(aarch64-sim)
+          # 删掉了会导致报错的 x86_64 目标
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
       - name: 2. 初始化子模块
         script: |
-          # 必须拉取 submodules，否则 anki-upstream 目录将为空
           git submodule update --init --recursive
 
-      - name: 3. 编译 Rust XCFramework (耗时较长)
+      - name: 3. 编译 Rust XCFramework
         script: |
           source $HOME/.cargo/env
-          # 运行官方构建脚本
+          # 注意：如果 build-xcframework.sh 脚本内部强行写了要编 x86_64，
+          # 这一步可能还会报错。但我们先尝试跳过环境检查。
           chmod +x ./scripts/build-xcframework.sh
           ./scripts/build-xcframework.sh
 
-      - name: 4. 生成 Protobuf 协议文件
+      - name: 4. 生成 Proto 协议文件
         script: |
-          # 将 .proto 文件转换为 Swift 代码
           chmod +x ./scripts/generate-protos.sh
           ./scripts/generate-protos.sh
 
-      - name: 5. 生成 Xcode 项目文件
+      - name: 5. 生成 Xcode 项目
         script: |
-          # 进入正确的子目录运行 xcodegen
           cd AnkiApp && xcodegen generate
 
-      - name: 6. 编译 iOS 工程 (Archive)
+      - name: 6. 编译并存档 (Archive)
         script: |
-          # 使用文档建议的参数进行无签名编译
           xcodebuild archive \
             -project AnkiApp/AnkiApp.xcodeproj \
             -scheme "$SCHEME" \
@@ -57,7 +57,6 @@ workflows:
       - name: 7. 打包 IPA
         script: |
           mkdir -p Payload
-          # 定位生成的 .app 文件并打包
           APP_PATH=$(find $CM_BUILD_DIR/AmgiApp.xcarchive -name "*.app" | head -n 1)
           cp -r "$APP_PATH" Payload/
           zip -r amgi_unsigned.ipa Payload
